@@ -1,0 +1,436 @@
+using System.Collections.Generic;
+using System.Linq;
+using PinBoard.Editor.VisualElements;
+using UnityEditor;
+using UnityEditor.SceneManagement;
+using UnityEditor.UIElements;
+using UnityEngine;
+using UnityEngine.SceneManagement;
+using UnityEngine.UIElements;
+
+using Object = UnityEngine.Object;
+
+namespace PinBoard.Editor
+{
+
+    internal class PinBoardWindow : EditorWindow
+    {
+        private readonly Dictionary<PinContext, List<PinReference>> _pins = new()
+        {
+            { PinContext.Project, new List<PinReference>() },
+            { PinContext.Scene, new List<PinReference>() },
+        };
+
+        private readonly Dictionary<PinContext, VisualElement> _contextContent = new();
+
+        private PinContext _currentContext = PinContext.Project;
+
+        private PinBoardPage _pinBoardPage;
+
+        private VisualElement _pinContainer;
+        private ListView _pinListView;
+
+        private PinListView _scenePinsListView;
+        private PinListView _projectPinsListView;
+        private List<PinListViewContainer> _projectFolderListViewContainers;
+        private Button _folderCreationButton;
+
+        private enum PinContext
+        {
+            Project,
+            Scene,
+        }
+
+        [MenuItem("Window/PinBoard")]
+        public static void ShowWindow()
+        {
+            var window = GetWindow<PinBoardWindow>();
+            window.titleContent = new GUIContent("PinBoard");
+
+            // scenario: pinboard is opened. closing editor. open editor.
+            // pinboard window is restored, but not showing entries.
+            //window.LoadPinsPage();
+            //window.RefreshPins();
+            // so doing it on creategui
+        }
+
+        public void CreateGUI()
+        {
+            // Root layout
+            var root = rootVisualElement;
+            root.style.paddingLeft = 10;
+            root.style.paddingTop = 10;
+            root.style.paddingRight = 10;
+            root.style.paddingBottom = 10;
+
+            // Toolbar
+            var toolbar = new Toolbar();
+            var projectButton = new ToolbarToggle { text = "Project" };
+            var sceneButton = new ToolbarToggle { text = "Scene" };
+
+            projectButton.RegisterValueChangedCallback(evt =>
+            {
+                if(evt.newValue)
+                {
+                    sceneButton.SetValueWithoutNotify(false);
+                    //SwitchContext(PinContext.Project);
+                    ExitContext(_currentContext);
+                    EnterContext(PinContext.Project);
+                }
+            });
+
+            sceneButton.RegisterValueChangedCallback(evt =>
+            {
+                if(evt.newValue)
+                {
+                    projectButton.SetValueWithoutNotify(false);
+                    //SwitchContext(PinContext.Scene);
+                    ExitContext(_currentContext);
+                    EnterContext(PinContext.Scene);
+                }
+            });
+
+            ToolbarToggle currentToggle = _currentContext switch
+            {
+                PinContext.Project => projectButton,
+                PinContext.Scene => sceneButton,
+                _ => throw default,
+            };
+
+            currentToggle.value = true;
+
+            toolbar.Add(projectButton);
+            toolbar.Add(sceneButton);
+            root.Add(toolbar);
+
+            // Scroll container for pins
+            //old
+            _pinContainer = new ScrollView(scrollViewMode: ScrollViewMode.Vertical);
+            //new
+            _pinListView = new ListView
+            {
+                showAlternatingRowBackgrounds = AlternatingRowBackground.ContentOnly,
+                showBorder = true,
+                reorderable = true,
+                reorderMode = ListViewReorderMode.Animated, // feels nice
+                virtualizationMethod = CollectionVirtualizationMethod.DynamicHeight
+            };
+            _pinContainer.AddToClassList("pin-container");
+            //_pinContainer.RegisterCallback<DragPerformEvent>(OnDragPerform);
+            //_pinContainer.RegisterCallback<DragUpdatedEvent>(OnDragUpdate);
+
+            _pinListView.RegisterCallback<DragPerformEvent>(OnDragPerform);
+            _pinListView.RegisterCallback<DragUpdatedEvent>(OnDragUpdate);
+
+            _pinContainer.RegisterCallback<DragEnterEvent>(evt =>
+            {
+                DragAndDrop.visualMode = DragAndDropVisualMode.Copy;
+            });
+
+            _pinContainer.pickingMode = PickingMode.Position; // allows receiving drag events
+
+            //_pinContainer.style.minHeight = 200;
+            _pinContainer.style.flexGrow = 1f;
+            _pinContainer.style.backgroundColor = new Color(0, 0, 0, 0.05f); // light gray for debug
+
+            //root.Add(_pinContainer);
+            //root.Add(_pinListView);
+            BindContainerToPinList();
+
+            _folderCreationButton = new Button(CreatePinsFolder) { text = "Create" };
+            root.Add(_folderCreationButton);
+
+            //LoadPins();
+
+            _pinBoardPage = PluginDataStorage.LoadOrCreatePinBoardPage();
+
+            var projectContextContent = new VisualElement();
+            var sceneContextContent = new VisualElement();
+
+            _projectPinsListView = new PinListView(_pinBoardPage.ProjectPins);
+            _scenePinsListView = new PinListView(_pinBoardPage.ScenePins);
+
+            _projectFolderListViewContainers = _pinBoardPage.ProjectFolders.Select(folder =>
+                new PinListViewContainer(folder.Name, folder.Pins)).ToList();
+
+            projectContextContent.Add(_projectPinsListView);
+
+            foreach(PinFolder folder in _pinBoardPage.ProjectFolders)
+            {
+                var pinListContainer = new PinListViewContainer(folder.Name, folder.Pins);
+                projectContextContent.Add(pinListContainer);
+            }
+
+            sceneContextContent.Add(_scenePinsListView);
+
+            _contextContent.Add(PinContext.Project, projectContextContent);
+            _contextContent.Add(PinContext.Scene, sceneContextContent);
+
+            EnterContext(_currentContext);
+
+            UpdateContextContent();
+            EditorSceneManager.sceneOpened += OnSceneOpened;
+            EditorSceneManager.sceneClosed += OnSceneClosed;
+        }
+
+        private void EnterContext(PinContext context) 
+        {
+            rootVisualElement.Add(_contextContent[context]);
+            _currentContext = context;
+        }
+
+        private void ExitContext(PinContext context)
+        {
+            rootVisualElement.Remove(_contextContent[context]);
+        }
+
+        private void CreatePinsFolder()
+        {
+            Debug.Log($"creating pins folder");
+            var root = rootVisualElement;
+
+            var folderPins = new List<PinReference>();
+            _pinBoardPage.ProjectFolders.Add(new PinFolder("1", folderPins));
+
+            var pinFolder = new ListView
+            {
+                showAlternatingRowBackgrounds = AlternatingRowBackground.ContentOnly,
+                showBorder = true,
+                reorderable = true,
+                reorderMode = ListViewReorderMode.Animated, // feels nice
+                virtualizationMethod = CollectionVirtualizationMethod.DynamicHeight
+            };
+
+            pinFolder.itemsSource = folderPins;
+
+            //root.Add(pinFolder);
+
+            //
+
+            var listView = new PinListViewContainer("asd", folderPins);
+            listView.RefreshPins();
+
+            root.Add(listView);
+
+            _folderCreationButton.BringToFront();
+        }
+
+        private void BindContainerToPinList()
+        {
+            _pinListView.itemsSource = _pins[_currentContext];
+
+            _pinListView.makeItem = () =>
+            {
+                var row = new RowElement();
+
+                var objectField = new ObjectField
+                {
+                    objectType = typeof(Object),
+                    allowSceneObjects = true,
+                    style = { flexGrow = 1, minWidth = 0 }
+                };
+                row.Add(objectField);
+
+                var removeButton = new Button { text = "X", style = { width = 20, marginLeft = 5 } };
+                row.Add(removeButton);
+
+                return row;
+            };
+
+            _pinListView.bindItem = (ve, i) =>
+            {
+                var pin = _pins[_currentContext][i];
+                var obj = pin.Resolve();
+
+                var objectField = ve.Q<ObjectField>();
+                objectField.value = obj;
+                objectField.SetEnabled(false);
+
+                var removeButton = ve.Q<Button>();
+                removeButton.clicked += () =>
+                {
+                    // our items can be reordered, but the i is captured!
+                    // we need to RemoveAt(ve.index?) how do we do that?
+                    //_pins[_currentContext].RemoveAt(i);
+                    _pins[_currentContext].Remove(pin);
+                    _pinListView.Rebuild();
+                    SavePins();
+                };
+            };
+        }
+
+        private void LoadPins()
+        {
+            _pinBoardPage = PluginDataStorage.LoadOrCreatePinBoardPage();
+            _pins[PinContext.Project] = _pinBoardPage.ProjectPins;
+            _pins[PinContext.Scene] = _pinBoardPage.ScenePins;
+        }
+
+        private void OnSceneClosed(Scene scene) => UpdateContextContent();
+        private void OnSceneOpened(Scene scene, OpenSceneMode mode) => UpdateContextContent();
+
+        private void OnDisable()
+        {
+            EditorSceneManager.sceneOpened -= OnSceneOpened;
+            EditorSceneManager.sceneClosed -= OnSceneClosed;
+        }
+
+        private void OnDragPerform(DragPerformEvent evt)
+        {
+            DragAndDrop.AcceptDrag();
+
+            foreach(Object draggedObject in DragAndDrop.objectReferences)
+            {
+                if(draggedObject == null)
+                    continue;
+
+                bool isPersistent = EditorUtility.IsPersistent(draggedObject);
+                bool isNotPersistent = !isPersistent;
+
+                if((_currentContext is PinContext.Project && isNotPersistent) ||
+                    (_currentContext is PinContext.Scene && isPersistent))
+                {
+                    continue; // Skip incompatible objects
+                }
+
+                if(PinReference.TryGetFromObject(draggedObject, out PinReference pin) is false)
+                    return;
+
+                if(_pins[_currentContext].Exists(p => p.GlobalIdString == pin.GlobalIdString) is false)
+                    _pins[_currentContext].Add(pin);
+            }
+
+            UpdateContextContent();
+            evt.StopPropagation();
+            SavePins();
+        }
+
+        private void OnDragUpdate(DragUpdatedEvent evt)
+        {
+            if(DragAndDrop.objectReferences.Length == 0)
+                return;
+
+            bool seenScene = false, seenProject = false;
+
+            foreach(var obj in DragAndDrop.objectReferences)
+            {
+                if(obj == null)
+                    continue;
+
+                if(EditorUtility.IsPersistent(obj))
+                    seenProject = true;
+                else
+                    seenScene = true;
+
+                if(seenProject && seenScene)
+                    break; // Mixed selection detected
+            }
+
+            if(seenProject && seenScene)
+            {
+                DragAndDrop.visualMode = DragAndDropVisualMode.Rejected;
+                evt.StopPropagation();
+                return;
+            }
+
+            bool isValidForContext = _currentContext switch
+            {
+                PinContext.Project => seenProject,
+                PinContext.Scene => seenScene,
+                _ => false
+            };
+
+            DragAndDrop.visualMode = isValidForContext ? DragAndDropVisualMode.Copy : DragAndDropVisualMode.Rejected;
+            evt.StopPropagation();
+        }
+
+        private void UpdateContextContent()
+        {
+            _pinListView.itemsSource = _pins[_currentContext];
+            _pinListView.Rebuild();
+            return;
+
+            _pinContainer.Clear();
+
+            foreach(PinReference pin in _pins[_currentContext])
+            {
+                var pinnedObject = pin.Resolve();
+
+                if(pinnedObject == null)
+                    continue;
+
+                var objectField = new ObjectField
+                {
+                    value = pinnedObject,
+                    objectType = typeof(Object),
+                    allowSceneObjects = true,
+                    enabledSelf = false,
+                };
+                objectField.style.flexGrow = 1;        // Fills the remaining space
+                objectField.style.flexShrink = 1;
+                objectField.style.minWidth = 0;        // Prevent overflow/truncation
+
+                var removeButton = new Button(() =>
+                {
+                    _pins[_currentContext].Remove(pin);
+                    UpdateContextContent();
+                    SavePins();
+                })
+                {
+                    text = "X",
+                    style = { width = 20, marginLeft = 5 }
+                };
+
+                var row = new RowElement();
+                row.Add(objectField);
+                row.Add(removeButton);
+
+                //row.RegisterCallback<MouseDownEvent>(evt =>
+                //{
+                //    if(evt.button == 2) // Middle mouse button
+                //    {
+                //        _pins[_currentContext].Remove(pin);
+                //        RefreshPins();
+                //        evt.StopPropagation(); // Optional: prevent bubbling if needed
+                //    }
+                //});
+
+                row.RegisterCallback<MouseDownEvent>(evt =>
+                {
+                    switch(evt.button)
+                    {
+                        //case 1: // RMB Ping
+                        //    PingObject(resolved);
+                        //    evt.StopPropagation();
+                        //    break;
+
+                        case (int)MouseButton.MiddleMouse: // MMB Remove
+                            _pins[_currentContext].Remove(pin);
+                            UpdateContextContent();
+                            evt.StopPropagation();
+                            SavePins();
+                            break;
+                    }
+                });
+
+                _pinContainer.Add(row);
+            }
+        }
+
+        private void SavePins()
+        {
+            PluginDataStorage.SavePinBoardPage(_pinBoardPage);
+        }
+
+        private void SwitchContext(PinContext context)
+        {
+            var root = rootVisualElement;
+
+            root.Remove(_contextContent[context]); 
+            _currentContext = context;
+            root.Add(_contextContent[context]);
+
+            UpdateContextContent();
+        }
+    }
+}

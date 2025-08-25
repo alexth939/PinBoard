@@ -149,6 +149,7 @@ namespace PinBoard.Editor.VisualElements
                     // Use userData instead of capturing "i"
                     if(row.userData is PinReference pinRef)
                     {
+                        RemoveFromSelection(_pins.IndexOf(pinRef));
                         _pins.Remove(pinRef);
                         RefreshPins();
                         Modified?.Invoke();
